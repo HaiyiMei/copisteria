@@ -202,3 +202,38 @@ def test_rhythm_decoding_keeps_plain_eighths():
     evs = [E(x=10 * k, kind="note", typ="eighth", dist=_dist(k / 2, tup_none=0.4)) for k in range(4)]
     write._decode_rhythm(evs)
     assert [e.tup for e in evs[:-1]] == ["none"] * 3
+
+
+def _tokens(L, clef=lambda s: "G2"):
+    tok = {}
+    for s in L.syms:
+        real = {"p": 1.0, "det": 1.0, "ev": 0}
+        if s.fam == "measure":
+            tok[s.i] = {"real": real, "cls": {"v": "measure"}, "key": {"v": 0}, "time": {"v": "4/4"},
+                        "clef": {"v": clef(s)}}
+        elif s.fam == "grpSym":
+            tok[s.i] = {"real": real, "cls": {"v": "grpSym_brace"}}
+        else:
+            tok[s.i] = {"real": real, "cls": {"v": "note_quarter"}, "dots": {"v": 0}, "pos": {"v": 0},
+                        "voice": {"v": 1}, "tup": {"v": "none"}, "alter": {"v": 0}, "grace": {"v": "none"},
+                        "chord": 0.0, "tie": 0.0}
+    return tok
+
+
+def test_a_keyboard_part_that_enters_late_declares_its_staves(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    # an a cappella opening (the voice alone), then the voice over the braced piano
+    dets = staff_row(100, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 480, 8, 600)),
+         det("note_quarter", (50, 115, 60, 125), staff_position=0),
+         det("note_quarter", (50, 495, 60, 505), staff_position=0)]
+    L = front.build(dets, 400, 700)
+    assert [len(sy.staves) for sy in L.systems] == [1, 3]
+    root = ET.fromstring(write.write(_reading(L, _tokens(L))).split("\n", 2)[2])
+    voice, piano = root.findall("part")
+    assert piano.find("measure").find("note") is None                 # the piano is silent in bar 1 ...
+    assert piano.findtext("measure/attributes/staves") == "2"          # ... and says there that it has two staves
+

@@ -1209,7 +1209,12 @@ def write(rd: Reading, texts: list[dict] | None = None, title: str | None = None
             meas = _sub(part, "measure", number=number)
             if first is None:
                 if m_i == 0:
-                    _sub(_sub(meas, "attributes"), "divisions", div)
+                    # a part that enters late (a piano under a choir's a cappella opening) still gives its staves in
+                    # its first bar: a reader sets the part up from there (Verovio crashes on a staff 2 it never saw)
+                    attrs = _sub(meas, "attributes")
+                    _sub(attrs, "divisions", div)
+                    if len(pl.staves) > 1:
+                        _sub(attrs, "staves", len(pl.staves))
                 continue
             key, time = first["state"]["key"], first["state"]["time"]
             clefs = [s["state"]["clef"] if s else last["clefs"][i] for i, s in enumerate(staves)]
