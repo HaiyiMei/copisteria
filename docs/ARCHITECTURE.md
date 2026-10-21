@@ -118,6 +118,15 @@ accept or reject); the tokenizer writes both. The released model does not use th
 
 Transcription only: every decision was the model's. A symbol is written when its P(real) is 0.5 or more.
 
+* **Parts**: planned on the page's fullest system -- a pair of staves a brace spans is one part, every other staff
+  one. A system that shows fewer staves (a choir hidden under a piano introduction, a piano under an a cappella
+  passage, a quartet system without its viola) is placed among the fullest one's staves in order, skipping the
+  places it hides, for the best total over what its staves say: a braced pair kept together and on a braced pair,
+  a keyboard part never shown with one staff, each staff's opening clef and its label's instrument agreeing with
+  those at its place; ties go to the top, so a system with nothing to tell is counted from the top. A system with a
+  braced pair where the fullest has none is counted from the top too: the fullest is then a grand staff misread as
+  three staves, and no guide. A part silent in the page's first bars still declares its staves in bar 1.
+
 * **Pitch**: staff position under the clef in effect (a clef inside a bar takes over from its x on), plus the
   sounding alteration, decoded per staff and bar as notation defines it: each accidental glyph goes to one head
   (the nearest at its anchor's height to its right, one-to-one; a flat's anchor is its bowl) and sets that head's

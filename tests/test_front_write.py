@@ -237,3 +237,68 @@ def test_a_keyboard_part_that_enters_late_declares_its_staves(monkeypatch):
     assert piano.find("measure").find("note") is None                 # the piano is silent in bar 1 ...
     assert piano.findtext("measure/attributes/staves") == "2"          # ... and says there that it has two staves
 
+
+def _parts(L, tok):
+    """Per part: its staves, and per bar whether it sounds."""
+    root = ET.fromstring(write.write(_reading(L, tok)).split("\n", 2)[2])
+    return [(p.findtext("measure/attributes/staves") or "1", [m.find("note/pitch") is not None for m in p.findall("measure")])
+            for p in root.findall("part")]
+
+
+def test_a_piano_introduction_is_written_into_the_piano(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    # a piano introduction (two braced staves), then the full system: a voice over the braced piano
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 100, 8, 220)), det("grpSym_brace", (0, 480, 8, 600)),
+         det("note_quarter", (50, 115, 60, 125), staff_position=0),       # the introduction's right hand
+         det("note_quarter", (50, 415, 60, 425), staff_position=0)]       # the voice's first note
+    L = front.build(dets, 400, 700)
+    assert [len(sy.staves) for sy in L.systems] == [2, 3]
+    voice, piano = _parts(L, _tokens(L))
+    assert piano == ("2", [True, False, False, False, False])
+    assert voice == ("1", [False, False, True, False, False])
+
+
+def test_a_piano_introduction_without_its_brace_is_placed_by_its_clefs(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 480, 8, 600)),                            # the introduction's brace was missed
+         det("note_quarter", (50, 115, 60, 125), staff_position=0)]
+    L = front.build(dets, 400, 700)
+    bass = lambda s: "F4" if s.box[1] in (180, 560) else "G2"            # noqa: E731  the piano's left hand
+    voice, piano = _parts(L, _tokens(L, clef=bass))
+    assert piano == ("2", [True, False, False, False, False]) and not any(voice[1])
+
+
+def test_with_nothing_to_tell_a_system_is_counted_from_the_top(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("note_quarter", (50, 115, 60, 125), staff_position=0), det("note_quarter", (50, 195, 60, 205), staff_position=0)]
+    L = front.build(dets, 400, 700)
+    assert [len(sy.staves) for sy in L.systems] == [2, 3]
+    first, second, third = _parts(L, _tokens(L))
+    assert first[1][0] and second[1][0] and not third[1][0]
+
+
+def test_a_fullest_system_without_the_braced_pair_is_no_guide(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    # a piano page whose first grand staff was read as three staves (G, G, F, no brace); the next is a braced pair
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + staff_row(260, [0, 150, 300]) + \
+        staff_row(500, [0, 100, 200, 300]) + staff_row(580, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 500, 8, 620)), det("note_quarter", (50, 515, 60, 525), staff_position=0),
+         det("note_quarter", (50, 595, 60, 605), staff_position=0)]
+    L = front.build(dets, 400, 800)
+    assert [len(sy.staves) for sy in L.systems] == [3, 2]
+    bass = lambda s: "F4" if s.box[1] in (260, 580) else "G2"            # noqa: E731
+    parts = _parts(L, _tokens(L, clef=bass))
+    assert [sounds[2] for _, sounds in parts] == [True, True, False]       # the pair keeps the top two places
