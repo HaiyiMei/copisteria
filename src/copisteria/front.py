@@ -97,6 +97,7 @@ class Staff:
     x1: float
     system: int = -1
     pos: int = -1                  # index within its system (0 = top)
+    line_x0: float | None = None   # where its lines start with near-white taken as paper (_line_starts), if found
 
     @property
     def mid(self) -> float:
@@ -338,6 +339,8 @@ def _braced(syms: list[Sym], a: Staff, b: Staff) -> bool:
 
 INK_LINK = 0.85               # share of the gap a vertical ink run must cover to join two staves
 INK_SPLIT = 0.4               # below this (and no bar line through the gap): two systems
+STAFF_PAPER_TOL = 0.04        # near-white this close to the paper (of the way to the ink) is paper where a staff's
+                              # lines are taken to start (_line_starts): a JPEG's noise beside a brace is not a line
 FRAME_PAPER = 0.5             # a row (column) is the sheet's once it holds half the paper of the page's middle lines
 FRAME_MAX = 0.35              # a frame reaches at most this far in from its side (past it, that side has none)
 FRAME_SLIVER = 0.01           # a white sliver this thin may run along the image's edge outside a frame (export padding)
@@ -433,13 +436,23 @@ def _ink_run(mask, x: float, y0: float, y1: float, reach: int = 2) -> float:
     return float(mask[a:b, xa:xb].any(axis=1).mean())
 
 
+def _left_span(a: Staff, b: Staff, page_left: float, lines: bool = False) -> tuple[int, int]:
+    """The columns where the line, brace or bracket that opens a system stands, between staves a and b: from the
+    page's leftmost staff start (less 3 staff spaces) to a staff space past the earlier of their starts. ``lines``:
+    the starts of their lines with near-white taken as paper (line_x0) where found, past a brace that the noise
+    beside it joined to the staff (_line_starts)."""
+    sp = (a.sp + b.sp) / 2
+    start = (lambda st: max(st.x0, st.line_x0) if lines and st.line_x0 is not None else st.x0)    # noqa: E731
+    return int(min(page_left, a.x0, b.x0) - 3 * sp), int(min(start(a), start(b)) + sp)
+
+
 def _ink_links(gray, syms: list[Sym], a: Staff, b: Staff, page_left: float) -> tuple[float, float]:
     """(left, bars): how much of the gap between two staves a vertical ink run crosses at their left end (the
     system's opening line, brace or bracket -- the measure boxes start after the clef, so from the page's leftmost
     staff start on), and the share of a's detected bar lines whose ink runs on into b."""
     sp = (a.sp + b.sp) / 2
     y0, y1 = a.y1 + 1, b.y0 - 1
-    lo, hi = int(min(page_left, a.x0, b.x0) - 3 * sp), int(min(a.x0, b.x0) + sp)
+    lo, hi = _left_span(a, b, page_left)
     left = max((_ink_run(gray, x, y0, y1) for x in range(max(0, lo), hi + 1, 2)), default=0.0)
     lines = [s for s in syms if s.fam == "barLine" and s.p >= 0.5 and s.staff < 0 and
              a.y0 - sp <= s.cy <= a.y1 + sp and max(a.x0, b.x0) <= s.cx <= min(a.x1, b.x1)]
@@ -447,7 +460,41 @@ def _ink_links(gray, syms: list[Sym], a: Staff, b: Staff, page_left: float) -> t
     return left, bars
 
 
-def _systems(syms: list[Sym], staves: list[Staff], gray=None, ink: bool = False) -> list[System]:
+PALE = 0.12                   # a pale line is at least this far from the paper toward the ink (_pale_line)
+
+
+def _pale_line(levels, paper: float, dark: float, a: Staff, b: Staff, page_left: float) -> float:
+    """Share of the gap between two staves that a pale vertical line crosses where a system opens (_left_span, up
+    to the staves' line starts). On a small render the opening line is one anti-aliased pixel, grey 200-210 on
+    white, which the ink mask does not count; only a line counts here, with paper a staff space to either side, so
+    a grey patch (a stamp, its edge, a shadow) is not one. ``paper``, ``dark``: the page's median and 1st-percentile
+    levels. After issue #1's suggested _faint_line."""
+    H, W = levels.shape
+    ya, yb = max(0, int(round(a.y1 + 1))), min(H, int(round(b.y0 - 1)))
+    if yb - ya < 2:
+        return 0.0
+    lo, hi = _left_span(a, b, page_left, lines=True)
+    pale = levels[ya:yb] < paper - PALE * max(1.0, paper - dark)
+    away = max(3, int(round((a.sp + b.sp) / 2)))
+    best = 0.0
+    for x in range(max(away + 1, lo), min(W - away - 1, hi) + 1):
+        run = float(pale[:, x - 1:x + 2].any(axis=1).mean())
+        if run > best and all(float(pale[:, c - 1:c + 1].any(axis=1).mean()) < 0.5 for c in (x - away, x + away)):
+            best = run
+    return best
+
+
+def _opening_line(mask, a: Staff, b: Staff, page_left: float) -> float:
+    """How much of the gap between two staves an ink run crosses in the columns their line starts add to the
+    search (_left_span with ``lines``): the opening line, where a brace that touches a staff carried the staff's
+    start out onto the brace and the search stopped short of it."""
+    _, hi = _left_span(a, b, page_left)
+    _, hi2 = _left_span(a, b, page_left, lines=True)
+    return max((_ink_run(mask, x, a.y1 + 1, b.y0 - 1) for x in range(hi + 1, hi2 + 1, 2)), default=0.0)
+
+
+def _systems(syms: list[Sym], staves: list[Staff], gray=None, ink: bool = False, levels=None) -> list[System]:
+    """``gray``: the page's ink mask; ``levels``: its grey levels (for a line too pale for the mask)."""
     from . import links
     w = links.load()
     if w is not None and len(staves) > 1:
@@ -462,16 +509,27 @@ def _systems(syms: list[Sym], staves: list[Staff], gray=None, ink: bool = False)
         decided = [_braced(syms, staves[k - 1], staves[k]) or _aligned(syms, staves[k - 1], staves[k])
                    for k in range(1, len(staves))]
     if gray is not None and len(staves) > 1:
-        # the ink decides where it is clear: a line through the gap joins, a white gap separates; a brace or
-        # bracket the detector saw over both staves joins them whatever the ink
+        # the ink decides where it is clear: a line through the gap joins -- looked for up to where the staves' lines
+        # start (past a brace the paper's noise joined to them), and in the grey levels where the mask sees none (a
+        # small render's one-pixel opening line is too pale for it) --, a white gap separates; a brace or bracket
+        # the detector saw over both staves joins them whatever the ink
+        import numpy as np
         page_left = min(st.x0 for st in staves)
+        tone: list = []                                # the page's paper and dark levels, once needed
         for k in range(1, len(staves)):
-            left, bars = _ink_links(gray, syms, staves[k - 1], staves[k], page_left)
-            if left >= INK_LINK or bars >= 0.5:
+            a, b = staves[k - 1], staves[k]
+            left, bars = _ink_links(gray, syms, a, b, page_left)
+            line = 0.0
+            if left < INK_LINK and bars < 0.5:
+                line = _opening_line(gray, a, b, page_left)
+                if line < INK_LINK and levels is not None:
+                    tone = tone or [float(np.percentile(levels, 50)), float(np.percentile(levels, 1))]
+                    line = max(line, _pale_line(levels, *tone, a, b, page_left))
+            if left >= INK_LINK or line >= INK_LINK or bars >= 0.5:
                 decided[k - 1] = True
             elif left < INK_SPLIT and bars < 0.1:
                 decided[k - 1] = False            # white between them: a brace box claiming otherwise is wrong
-            elif _braced(syms, staves[k - 1], staves[k]):
+            elif _braced(syms, a, b):
                 decided[k - 1] = True
     systems: list[System] = []
     for k, st in enumerate(staves):
@@ -626,7 +684,25 @@ def _ink_staves(gray, syms: list[Sym]) -> list[Staff] | None:
     other = _ink_staves_from(clean_page(gray), gray, syms)
     if other is not None and (staves is None or _staves_score(other, syms) > 1.02 * _staves_score(staves, syms)):
         staves = other
+    if staves is not None:
+        _line_starts(gray, staves)
     return staves
+
+
+def _line_starts(gray, staves: list[Staff]) -> None:
+    """Each staff's line_x0: where the line finder starts its lines when near-white is paper (STAFF_PAPER_TOL).
+    Its own threshold is 254 on a page with pure white, so a JPEG's or a screen capture's faint noise beside a brace
+    (247-253 on 255 paper) is ink to it, joins the brace to the ends of the lines, and the staff starts on the brace,
+    left of the line that opens the system. Only that line's search uses it (_left_span); the staff's x0 stays the
+    finder's (the bar lines are cut from it)."""
+    from PIL import Image
+
+    from .vision.page.staves import find_staves
+    found = find_staves(Image.fromarray(gray), paper_tol=STAFF_PAPER_TOL).staves
+    for st in staves:
+        near = [f for f in found if abs((f.top + f.bottom) / 2 - st.mid) < st.sp]
+        if near:
+            st.line_x0 = float(near[0].x0)
 
 
 def _staves_score(staves: list[Staff], syms: list[Sym]) -> float:
@@ -870,12 +946,12 @@ def build(dets: list[dict], width: float, height: float, image=None, cands: list
     mask = ink_mask(gray) if gray is not None else None
     ink_path = bool(staves)
     if staves:
-        systems = _systems(syms, staves, mask, ink=True)
+        systems = _systems(syms, staves, mask, ink=True, levels=gray)
     else:
         staves = _staves(syms)
         _fill_gaps(syms, staves)
         _snap_bars(syms, staves)
-        systems = _systems(syms, staves, mask)
+        systems = _systems(syms, staves, mask, levels=gray)
     _assign(syms, staves)
     if cands:
         new = []

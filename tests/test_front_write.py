@@ -289,6 +289,20 @@ def test_with_nothing_to_tell_a_system_is_counted_from_the_top(monkeypatch):
     assert first[1][0] and second[1][0] and not third[1][0]
 
 
+def test_near_white_noise_does_not_carry_a_staff_onto_its_brace():
+    import numpy as np
+    from PIL import Image
+
+    from copisteria.vision.page.staves import find_staves
+    page = np.full((200, 500), 255, np.uint8)
+    for y in range(60, 110, 10):
+        page[y, 60:460] = 0                          # the staff's lines, from x = 60
+        page[y, 40:60] = 251                         # a JPEG's faint noise between them and the brace
+    page[50:120, 36:40] = 0                          # the brace
+    assert find_staves(Image.fromarray(page)).staves[0].x0 == 36            # 254: the noise is ink
+    assert find_staves(Image.fromarray(page), paper_tol=front.STAFF_PAPER_TOL).staves[0].x0 == 60
+
+
 def test_a_fullest_system_without_the_braced_pair_is_no_guide(monkeypatch):
     from copisteria import links
     monkeypatch.setattr(links, "load", lambda: None)
@@ -302,3 +316,34 @@ def test_a_fullest_system_without_the_braced_pair_is_no_guide(monkeypatch):
     bass = lambda s: "F4" if s.box[1] in (260, 580) else "G2"            # noqa: E731
     parts = _parts(L, _tokens(L, clef=bass))
     assert [sounds[2] for _, sounds in parts] == [True, True, False]       # the pair keeps the top two places
+
+
+def test_a_pale_one_pixel_line_is_evidence_a_grey_patch_is_not():
+    import numpy as np
+    levels = np.full((300, 400), 255, np.uint8)
+    levels[40:60, 50:350] = 0                        # ink, so the page has a dark end
+    a = front.Staff(bars=[], sp=4.5, y0=100, y1=118, x0=40, x1=380)
+    b = front.Staff(bars=[], sp=4.5, y0=180, y1=198, x0=40, x1=380)
+    line = levels.copy()
+    line[100:199, 38] = 204                          # a small render's opening line: one pixel, grey
+    patch = levels.copy()
+    patch[100:199, 20:45] = 204                      # a stamp over the margin
+    assert front._pale_line(line, 255, 0, a, b, 40) > 0.9
+    assert front._pale_line(patch, 255, 0, a, b, 40) < 0.5
+
+
+def test_a_pale_opening_line_joins_two_staves_and_a_white_gap_does_not():
+    import numpy as np
+    from PIL import Image
+    page = np.full((360, 620), 255, np.uint8)
+    for top in (100, 220):                           # a voice's staff and, below it, the piano's top staff
+        for y in range(top, top + 50, 10):
+            page[y, 60:560] = 0
+        for x in (60, 310, 559):
+            page[top:top + 41, x] = 0                # bar lines on each staff, none through the gap
+    dets = staff_row(100, [60, 310, 560]) + staff_row(220, [60, 310, 560])
+    white = front.build(dets, 620, 360, image=Image.fromarray(page))
+    page[100:261, 58] = 204                          # the system's opening line, one pixel, too pale for the mask
+    pale = front.build(dets, 620, 360, image=Image.fromarray(page))
+    assert [len(sy.staves) for sy in white.systems] == [1, 1]
+    assert [len(sy.staves) for sy in pale.systems] == [2]

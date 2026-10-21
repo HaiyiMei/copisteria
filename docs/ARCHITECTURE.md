@@ -45,7 +45,11 @@ Only geometry, and only what the writer cannot do without:
   overlapping measure boxes, and a gap between two of them that holds notes or rests is a bar of its own.
 * **Systems.** Two consecutive staves are one system when a vertical ink run crosses most of the gap between them
   at the system's left (the opening line, brace or bracket) or their bar lines' ink runs on from one into the other;
-  a white gap separates them whatever the boxes say. In between, a brace or bracket the detector saw over both, or
+  a white gap separates them whatever the boxes say. The line is looked for up to where the staves' lines start with
+  near-white taken as paper (the line finder's threshold takes a JPEG's faint noise beside a brace for ink, and
+  starts the staff on the brace, short of the line), and in the page's grey levels as well as its ink mask: a small
+  render's opening line is one anti-aliased pixel, too pale for the mask, and counts when it is a line (paper a staff
+  space to either side, so a stamp or a shadow does not). In between, a brace or bracket the detector saw over both, or
   the `links` model: a logistic model over the evidence a pair gives (a group symbol, how their bar lines line up,
   the gap), fitted on rendered pages and decoded with a preference for one staves-per-system count on a page.
 * **Bars.** Decided once per system for all its staves. A candidate x (a measure box's edge or a detected bar line,
