@@ -69,9 +69,16 @@ class StaffMap:
 
 
 def find_staves(image: Image.Image, min_run_frac: float = 0.05, rel_cover: float = 0.7, floor_cover: float = 0.05,
-                close_px: int = 2) -> StaffMap:
+                close_px: int = 2, paper_tol: float = 0.0) -> StaffMap:
+    """``paper_tol``: levels within this share of the way from the paper (median) to the ink (1st percentile) are
+    paper, whatever the threshold says. The threshold is 254 on any page with pure white (otsu), so the faint noise
+    a JPEG or a screen capture leaves beside its ink (247-253 on 255 paper) is ink to it, and joins a brace to the
+    ends of the staff lines it touches: the staff is then found to start on the brace. 0 keeps the threshold."""
     gray = np.asarray(image.convert("L"))
     thr = otsu(gray)
+    if paper_tol:
+        paper, ink = float(np.median(gray)), float(np.percentile(gray, 1))
+        thr = min(thr, int(np.ceil(paper - paper_tol * max(1.0, paper - ink))))
     ink = close_gaps((gray < thr).astype(np.int8), close_px)
     min_run = max(8, int(min_run_frac * gray.shape[1]))
     coverage, x0, x1 = long_run_profile(ink, min_run)

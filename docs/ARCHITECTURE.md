@@ -45,7 +45,11 @@ Only geometry, and only what the writer cannot do without:
   overlapping measure boxes, and a gap between two of them that holds notes or rests is a bar of its own.
 * **Systems.** Two consecutive staves are one system when a vertical ink run crosses most of the gap between them
   at the system's left (the opening line, brace or bracket) or their bar lines' ink runs on from one into the other;
-  a white gap separates them whatever the boxes say. In between, a brace or bracket the detector saw over both, or
+  a white gap separates them whatever the boxes say. The line is looked for up to where the staves' lines start with
+  near-white taken as paper (the line finder's threshold takes a JPEG's faint noise beside a brace for ink, and
+  starts the staff on the brace, short of the line), and in the page's grey levels as well as its ink mask: a small
+  render's opening line is one anti-aliased pixel, too pale for the mask, and counts when it is a line (paper a staff
+  space to either side, so a stamp or a shadow does not). In between, a brace or bracket the detector saw over both, or
   the `links` model: a logistic model over the evidence a pair gives (a group symbol, how their bar lines line up,
   the gap), fitted on rendered pages and decoded with a preference for one staves-per-system count on a page.
 * **Bars.** Decided once per system for all its staves. A candidate x (a measure box's edge or a detected bar line,
@@ -117,6 +121,15 @@ accept or reject); the tokenizer writes both. The released model does not use th
 ## 5. Writer (`write.py`)
 
 Transcription only: every decision was the model's. A symbol is written when its P(real) is 0.5 or more.
+
+* **Parts**: planned on the page's fullest system -- a pair of staves a brace spans is one part, every other staff
+  one. A system that shows fewer staves (a choir hidden under a piano introduction, a piano under an a cappella
+  passage, a quartet system without its viola) is placed among the fullest one's staves in order, skipping the
+  places it hides, for the best total over what its staves say: a braced pair kept together and on a braced pair,
+  a keyboard part never shown with one staff, each staff's opening clef and its label's instrument agreeing with
+  those at its place; ties go to the top, so a system with nothing to tell is counted from the top. A system with a
+  braced pair where the fullest has none is counted from the top too: the fullest is then a grand staff misread as
+  three staves, and no guide. A part silent in the page's first bars still declares its staves in bar 1.
 
 * **Pitch**: staff position under the clef in effect (a clef inside a bar takes over from its x on), plus the
   sounding alteration, decoded per staff and bar as notation defines it: each accidental glyph goes to one head

@@ -162,6 +162,135 @@ def _plan_parts(rd: Reading) -> list[PartPlan]:
     return plans
 
 
+ALIGN_BRACE = 2.0      # a braced pair of staves placed on a braced pair of the fullest system (or not); a keyboard
+                       # part shown with one of its two staves
+ALIGN_CLEF = 1.0       # a staff's opening clef the same as the one at its place in the fullest system (or another)
+ALIGN_LABEL = 3.0      # the instrument its label names the same as the one named at its place (or another)
+ALIGN_SHIFT = 0.01     # per place a staff moves from its count from the top: with nothing to tell, the top
+
+
+def _braced_pairs(L, sy, braces) -> set[int]:
+    """Indices i of a system's staves whose staff i and i + 1 a brace spans (and no other)."""
+    out = set()
+    for s in braces:
+        cov = [i for i, k in enumerate(sy.staves) if s.box[1] - L.staves[k].sp <= L.staves[k].mid
+               <= s.box[3] + L.staves[k].sp]
+        if len(cov) == 2 and cov[1] == cov[0] + 1:
+            out.add(cov[0])
+    return out
+
+
+def _opening_clef(rd: Reading, k: int) -> str | None:
+    """The clef a staff's first bar reads (the one the system opens with), if the model read one."""
+    bars = rd.layout.staves[k].bars
+    r = rd.tok.get(bars[0]) if bars else None
+    return r["clef"]["v"] if r and "clef" in r else None
+
+
+def _staff_labels(rd: Reading, texts: list, braces: list) -> dict[int, str]:
+    """The instrument each staff's label names (staff -> instrument id): a text the instrument table knows, at the
+    left of a staff or a braced pair where a part's label sits, given to the staves it sits best against."""
+    from .instruments import match
+    L = rd.layout
+    cands = [t for t in texts if str(t.get("text", "")).strip() and t.get("role") not in NOT_NAMES and "xyxy" in t]
+    if not cands:
+        return {}
+    context = [t["text"] for t in texts if t.get("role") in ("label", "labelAbbr")]
+    first = _first_symbols(L)
+    units = []                                     # a braced pair's two staves, or one staff
+    for sy in L.systems:
+        own = _braced_pairs(L, sy, braces)
+        i = 0
+        while i < len(sy.staves):
+            n = 2 if i in own else 1
+            units.append(sy.staves[i:i + n])
+            i += n
+    out: dict[int, str] = {}
+    for t in cands:
+        m = match(t["text"], context)
+        if m is None:
+            continue
+        at = max(units, key=lambda ks: _label_where(L, ks, first, t))
+        if _label_where(L, at, first, t) >= LABEL_WHERE_MIN:
+            for k in at:
+                out[k] = m.instrument.id
+    return out
+
+
+def _align_systems(rd: Reading, plans: list, texts: list | None = None) -> list[dict[int, int]]:
+    """Where each system's staves sit among the fullest system's, whose places the parts are planned on: per
+    system, place -> staff. A system that shows fewer staves (a choir hidden under a piano introduction, a piano
+    hidden under an a cappella passage) is matched to the fullest one in order, with the hidden places skipped, for
+    the best total over what its staves say: a braced pair lands on a braced pair and a keyboard part is shown
+    whole, a staff's opening clef and its label agree with those at its place. With nothing to tell, a system's
+    staves are counted from the top; and so where a system shows a keyboard part (a braced pair) and the fullest
+    system none: that one is no guide (a grand staff read as three staves, a phantom staff between its two), and
+    placing the other systems against it splits their keyboard part."""
+    L = rd.layout
+    if not L.systems:
+        return []
+    tmpl = max(L.systems, key=lambda sy: len(sy.staves))
+    K = len(tmpl.staves)
+    pair = {pl.staves[0] for pl in plans if len(pl.staves) == 2}        # first places of the braced pairs
+    braces = [s for s in L.syms if _real(rd, s.i) and _cls(rd, s.i) == "grpSym_brace"]
+    labels = _staff_labels(rd, texts or [], braces)
+    t_clef = [_opening_clef(rd, k) for k in tmpl.staves]
+    t_label = [labels.get(k) for k in tmpl.staves]
+    out = []
+    for sy in L.systems:
+        n = len(sy.staves)
+        if n == K:
+            out.append(dict(enumerate(sy.staves)))
+            continue
+        own = _braced_pairs(L, sy, braces)
+        if own and not pair:
+            out.append(dict(enumerate(sy.staves)))
+            continue
+        clefs = [_opening_clef(rd, k) for k in sy.staves]
+
+        def unary(i: int, p: int) -> float:
+            v = -ALIGN_SHIFT * abs(p - i)
+            if clefs[i] and t_clef[p]:
+                v += ALIGN_CLEF if clefs[i] == t_clef[p] else -ALIGN_CLEF
+            lab = labels.get(sy.staves[i])
+            if lab and t_label[p]:
+                v += ALIGN_LABEL if lab == t_label[p] else -ALIGN_LABEL
+            return v
+
+        def link(i: int, q: int, p: int) -> float:
+            """Staff i - 1 at place q, staff i at place p."""
+            v = 0.0
+            if i - 1 in own and p != q + 1:           # a brace's two staves placed apart
+                v -= ALIGN_BRACE
+            elif i - 1 in own and q in pair:            # ... or on a braced pair
+                v += ALIGN_BRACE
+            if q in pair and p != q + 1:                # a keyboard part's lower staff hidden
+                v -= ALIGN_BRACE
+            if p - 1 in pair and q != p - 1:            # its upper staff hidden
+                v -= ALIGN_BRACE
+            return v
+
+        # best[i][p]: the best total with staff i at place p; places rise down the system
+        best = [[-math.inf] * K for _ in range(n)]
+        back = [[-1] * K for _ in range(n)]
+        for p in range(K - n + 1):
+            best[0][p] = unary(0, p) - (ALIGN_BRACE if p - 1 in pair else 0.0)
+        for i in range(1, n):
+            for p in range(i, K - n + i + 1):
+                for q in range(i - 1, p):
+                    v = best[i - 1][q] + link(i, q, p)
+                    if v > best[i][p]:
+                        best[i][p], back[i][p] = v, q
+                best[i][p] += unary(i, p)
+        p = max(range(n - 1, K), key=lambda p: best[n - 1][p] - (ALIGN_BRACE if p in pair else 0.0))
+        places = [p]
+        for i in range(n - 1, 0, -1):
+            p = back[i][p]
+            places.append(p)
+        out.append({p: k for p, k in zip(reversed(places), sy.staves)})
+    return out
+
+
 def _part_groups(rd: Reading, plans: list) -> list[tuple[int, int, str]]:
     """(first part, last part, bracket|brace) for every detected bracket or brace that spans more than one part of
     the fullest system."""
@@ -417,12 +546,14 @@ def _voices(events: list[Event], sp: float, single_staff_part: bool = True,
 BEAM_REACH = 0.7                # how far past a beam box's ends a stem may stand (staff spaces)
 
 
-def _attach(rd: Reading, built: list, plans: list, texts: list, mask=None) -> None:
+def _attach(rd: Reading, built: list, plans: list, texts: list, place: list, mask=None) -> None:
     """Page-wide marks attached to the notes they belong to, by position: beams (the notes under a beam box,
     levels from their types), slurs (the notes nearest a curve's two ends, unless the model read that curve's
     notes as tied; a curve running off the end of its system continues to the next one), arpeggios, octave
-    lines (which also move the sounding pitch), pedal lines, segno / coda, and OCR'd direction words."""
+    lines (which also move the sounding pitch), pedal lines, segno / coda, and OCR'd direction words.
+    ``place``: per system, place -> staff (_align_systems)."""
     L = rd.layout
+    slot = {k: p for at in place for p, k in at.items()}       # staff -> its place in the fullest system
     notes_on: dict[int, list] = {}                 # staff -> its note events (originals only), in system order
     for measures in built:
         for m in measures:
@@ -440,7 +571,7 @@ def _attach(rd: Reading, built: list, plans: list, texts: list, mask=None) -> No
 
     # beams: every beamed-note root under the box, in the box's voice; levels from the note types
     claimed: set = set()
-    part_of = {pos: pi for pi, pl in enumerate(plans) for pos in pl.staves}    # staff position -> its part
+    part_of = {pos: pi for pi, pl in enumerate(plans) for pos in pl.staves}    # place -> its part
 
     def under_beam(b):
         sp = L.staves[b.staff].sp
@@ -449,7 +580,7 @@ def _attach(rd: Reading, built: list, plans: list, texts: list, mask=None) -> No
         st_b = L.staves[b.staff]
         near_staves = [b.staff] + [k for k in (b.staff - 1, b.staff + 1) if 0 <= k < len(L.staves) and
                                    L.staves[k].system == st_b.system and
-                                   part_of.get(L.staves[k].pos, -1) == part_of.get(st_b.pos, -2)]
+                                   part_of.get(slot.get(k), -1) == part_of.get(slot.get(b.staff), -2)]
 
         def reach(e):
             # a beam meets its notes at their stems: a head under the beam has its stem up, at its right side; a
@@ -513,7 +644,7 @@ def _attach(rd: Reading, built: list, plans: list, texts: list, mask=None) -> No
         if abs(sym[z.si].cx - c.box[2]) > 2.5 * sp:
             if c.box[2] < st.x1 - 3 * sp:
                 continue
-            nxt = _next_system_first(L, notes_on, c.staff)       # runs off the system: to the next one's first note
+            nxt = _next_system_first(L, notes_on, c.staff, place)   # runs off the system: to the next one's first note
             if nxt is None:
                 continue
             z = nxt
@@ -617,15 +748,16 @@ def _dashes_after(mask, box, sp: float) -> float | None:
     return float(xa + dashes[-1][1]) if len(dashes) >= 2 else None
 
 
-def _next_system_first(L, notes_on, staff: int):
-    """The first note of the same staff position in the next system, if there is one."""
+def _next_system_first(L, notes_on, staff: int, place: list):
+    """The first note of the same place (the same part's staff) in the next system, if there is one."""
     st = L.staves[staff]
     if st.system + 1 >= len(L.systems):
         return None
-    nxt = L.systems[st.system + 1]
-    if st.pos >= len(nxt.staves):
+    p = next(p for p, k in place[st.system].items() if k == staff)
+    k = place[st.system + 1].get(p)
+    if k is None:
         return None
-    evs = notes_on.get(nxt.staves[st.pos], [])
+    evs = notes_on.get(k, [])
     return evs[0] if evs else None
 
 
@@ -989,9 +1121,34 @@ NAME_LOGP = {"exact": 0.0, "alias": 0.0, "context": 0.0, "subset": math.log(0.9)
 UNKNOWN_NAME_LOGP = math.log(0.01)   # the text names no instrument the table knows (a lyric, a bar number, noise)
 NO_NAME_LOGP = math.log(0.02)        # a part the page names nowhere
 NOT_NAMES = ("pgHead_title", "pgHead_composer", "pgHead_subtitle", "pgFoot")
+LABEL_WHERE_MIN = -2.0           # a text placed worse than this against every staff (_label_where) labels none of them
 
 
-def _part_names(rd: Reading, plans: list, texts: list) -> list[str | None]:
+def _first_symbols(L) -> dict[int, float]:
+    """Staff -> x of its first symbol (its clef, mostly): a label sits against it, not the staff's start, which the
+    front end may put left of the label."""
+    first: dict[int, float] = {}
+    for sym in L.syms:
+        if sym.staff >= 0 and sym.fam in ("clef", "keySig", "meterSig", "note", "rest") and sym.p >= 0.5:
+            first[sym.staff] = min(first.get(sym.staff, math.inf), sym.box[0])
+    return first
+
+
+def _label_where(L, ks: list[int], first: dict, t: dict) -> float:
+    """How well a text sits where the label of the staves ``ks`` (one part's, in one system) does: log-density over
+    its gap to their first symbols (LABEL_GAP) and its height down them (LABEL_HEIGHT)."""
+    st = [L.staves[k] for k in ks]
+    top, bot = min(s.y0 for s in st), max(s.y1 for s in st)
+    sp = max(1.0, sorted(s.sp for s in st)[len(st) // 2])
+    x0 = min(first.get(k, L.staves[k].x0) for k in ks)
+    tx0, ty0, tx1, ty1 = t["xyxy"]
+    gap = (x0 - tx1) / sp
+    h = ((ty0 + ty1) / 2 - top) / max(1.0, bot - top)
+    return -0.5 * ((gap - LABEL_GAP[0]) / (LABEL_GAP[1] if gap >= 0 else LABEL_INTO)) ** 2 \
+        - 0.5 * ((h - LABEL_HEIGHT[0]) / LABEL_HEIGHT[1]) ** 2
+
+
+def _part_names(rd: Reading, plans: list, texts: list, place: list) -> list[str | None]:
     """Each part's name, decoded jointly: every OCR'd text could name any part, scored by where it sits against
     that part's staves (on any system), what it says (an instrument the table knows, instruments.match) and the
     role the OCR gave it; the parts and texts are paired one-to-one for the best total, a part taking no name where
@@ -1011,28 +1168,15 @@ def _part_names(rd: Reading, plans: list, texts: list) -> list[str | None]:
         m = match(t["text"], context)
         said.append((NAME_LOGP.get(m.how, math.log(0.7)) if m else UNKNOWN_NAME_LOGP) +
                     LABEL_ROLE_LOGP.get(t.get("role"), OTHER_ROLE_LOGP))
-    first: dict[int, float] = {}         # staff -> x of its first symbol (its clef, mostly)
-    for sym in L.syms:
-        if sym.staff >= 0 and sym.fam in ("clef", "keySig", "meterSig", "note", "rest") and sym.p >= 0.5:
-            first[sym.staff] = min(first.get(sym.staff, math.inf), sym.box[0])
+    first = _first_symbols(L)
     S = np.full((len(plans), len(cands)), -1e9)
     for n, pl in enumerate(plans):
-        for sy in L.systems:
-            ks = [sy.staves[pos] for pos in pl.staves if pos < len(sy.staves)]
-            st = [L.staves[k] for k in ks]
-            if not st:
+        for at in place:
+            ks = [at[pos] for pos in pl.staves if pos in at]
+            if not ks:
                 continue
-            top, bot = min(s.y0 for s in st), max(s.y1 for s in st)
-            sp = max(1.0, sorted(s.sp for s in st)[len(st) // 2])
-            x0 = min(first.get(k, L.staves[k].x0) for k in ks)
             for j, t in enumerate(cands):
-                tx0, ty0, tx1, ty1 = t["xyxy"]
-                gap = (x0 - tx1) / sp
-                into = (ty0 + ty1) / 2 - top
-                h = into / max(1.0, bot - top)
-                where = -0.5 * ((gap - LABEL_GAP[0]) / (LABEL_GAP[1] if gap >= 0 else LABEL_INTO)) ** 2 \
-                    - 0.5 * ((h - LABEL_HEIGHT[0]) / LABEL_HEIGHT[1]) ** 2
-                S[n, j] = max(S[n, j], where + said[j])
+                S[n, j] = max(S[n, j], _label_where(L, ks, first, t) + said[j])
     P, T = S.shape
     cost = np.full((P, T + P), 1e9)
     cost[:, :T] = -S
@@ -1048,8 +1192,9 @@ def write(rd: Reading, texts: list[dict] | None = None, title: str | None = None
     """``image``: the page (PIL image or grey array), for what is read off the ink here (dashes after words)."""
     L = rd.layout
     plans = _plan_parts(rd)
-    root = ET.Element("score-partwise", version="4.0")
     texts = texts or []
+    place = _align_systems(rd, plans, texts)            # per system: place (in the fullest system) -> staff
+    root = ET.Element("score-partwise", version="4.0")
     t_title = title or next((t["text"] for t in texts if t.get("role") == "pgHead_title"), None)
     if t_title:
         _sub(_sub(root, "work"), "work-title", t_title)
@@ -1060,7 +1205,7 @@ def write(rd: Reading, texts: list[dict] | None = None, title: str | None = None
     enc = _sub(ident, "encoding")
     _sub(enc, "software", "copisteria")
     plist = _sub(root, "part-list")
-    names = _part_names(rd, plans, texts)
+    names = _part_names(rd, plans, texts, place)
     groups = _part_groups(rd, plans)
     for n, pl in enumerate(plans):
         for g, (a, b, sym) in enumerate(groups):
@@ -1096,11 +1241,11 @@ def write(rd: Reading, texts: list[dict] | None = None, title: str | None = None
                 sy = L.systems[s_i]
                 m = {"staves": [], "time": None, "key": None}
                 for k_i, pos in enumerate(pl.staves):
-                    if pos >= len(sy.staves):
+                    staff = place[s_i].get(pos)
+                    if staff is None:                  # a staff this system hides
                         m["staves"].append(None)
                         continue
-                    staff = sy.staves[pos]
-                    cols = sy.columns[pos]
+                    cols = sy.columns[sy.staves.index(staff)]
                     bars = [j for j, cc in enumerate(cols) if cc == c]
                     if not bars:
                         m["staves"].append(None)
@@ -1172,7 +1317,7 @@ def write(rd: Reading, texts: list[dict] | None = None, title: str | None = None
 
         from .front import ink_mask
         mask = ink_mask(np.asarray(image.convert("L") if hasattr(image, "convert") else image))
-    _attach(rd, built, plans, texts, mask)
+    _attach(rd, built, plans, texts, place, mask)
 
     # each bar column is as long as most staves make it; a voice running past that is cut there
     bar_ends = _column_lengths(built)
@@ -1209,7 +1354,12 @@ def write(rd: Reading, texts: list[dict] | None = None, title: str | None = None
             meas = _sub(part, "measure", number=number)
             if first is None:
                 if m_i == 0:
-                    _sub(_sub(meas, "attributes"), "divisions", div)
+                    # a part that enters late (a piano under a choir's a cappella opening) still gives its staves in
+                    # its first bar: a reader sets the part up from there (Verovio crashes on a staff 2 it never saw)
+                    attrs = _sub(meas, "attributes")
+                    _sub(attrs, "divisions", div)
+                    if len(pl.staves) > 1:
+                        _sub(attrs, "staves", len(pl.staves))
                 continue
             key, time = first["state"]["key"], first["state"]["time"]
             clefs = [s["state"]["clef"] if s else last["clefs"][i] for i, s in enumerate(staves)]

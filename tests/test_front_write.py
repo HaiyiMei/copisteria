@@ -202,3 +202,148 @@ def test_rhythm_decoding_keeps_plain_eighths():
     evs = [E(x=10 * k, kind="note", typ="eighth", dist=_dist(k / 2, tup_none=0.4)) for k in range(4)]
     write._decode_rhythm(evs)
     assert [e.tup for e in evs[:-1]] == ["none"] * 3
+
+
+def _tokens(L, clef=lambda s: "G2"):
+    tok = {}
+    for s in L.syms:
+        real = {"p": 1.0, "det": 1.0, "ev": 0}
+        if s.fam == "measure":
+            tok[s.i] = {"real": real, "cls": {"v": "measure"}, "key": {"v": 0}, "time": {"v": "4/4"},
+                        "clef": {"v": clef(s)}}
+        elif s.fam == "grpSym":
+            tok[s.i] = {"real": real, "cls": {"v": "grpSym_brace"}}
+        else:
+            tok[s.i] = {"real": real, "cls": {"v": "note_quarter"}, "dots": {"v": 0}, "pos": {"v": 0},
+                        "voice": {"v": 1}, "tup": {"v": "none"}, "alter": {"v": 0}, "grace": {"v": "none"},
+                        "chord": 0.0, "tie": 0.0}
+    return tok
+
+
+def test_a_keyboard_part_that_enters_late_declares_its_staves(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    # an a cappella opening (the voice alone), then the voice over the braced piano
+    dets = staff_row(100, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 480, 8, 600)),
+         det("note_quarter", (50, 115, 60, 125), staff_position=0),
+         det("note_quarter", (50, 495, 60, 505), staff_position=0)]
+    L = front.build(dets, 400, 700)
+    assert [len(sy.staves) for sy in L.systems] == [1, 3]
+    root = ET.fromstring(write.write(_reading(L, _tokens(L))).split("\n", 2)[2])
+    voice, piano = root.findall("part")
+    assert piano.find("measure").find("note") is None                 # the piano is silent in bar 1 ...
+    assert piano.findtext("measure/attributes/staves") == "2"          # ... and says there that it has two staves
+
+
+def _parts(L, tok):
+    """Per part: its staves, and per bar whether it sounds."""
+    root = ET.fromstring(write.write(_reading(L, tok)).split("\n", 2)[2])
+    return [(p.findtext("measure/attributes/staves") or "1", [m.find("note/pitch") is not None for m in p.findall("measure")])
+            for p in root.findall("part")]
+
+
+def test_a_piano_introduction_is_written_into_the_piano(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    # a piano introduction (two braced staves), then the full system: a voice over the braced piano
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 100, 8, 220)), det("grpSym_brace", (0, 480, 8, 600)),
+         det("note_quarter", (50, 115, 60, 125), staff_position=0),       # the introduction's right hand
+         det("note_quarter", (50, 415, 60, 425), staff_position=0)]       # the voice's first note
+    L = front.build(dets, 400, 700)
+    assert [len(sy.staves) for sy in L.systems] == [2, 3]
+    voice, piano = _parts(L, _tokens(L))
+    assert piano == ("2", [True, False, False, False, False])
+    assert voice == ("1", [False, False, True, False, False])
+
+
+def test_a_piano_introduction_without_its_brace_is_placed_by_its_clefs(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 480, 8, 600)),                            # the introduction's brace was missed
+         det("note_quarter", (50, 115, 60, 125), staff_position=0)]
+    L = front.build(dets, 400, 700)
+    bass = lambda s: "F4" if s.box[1] in (180, 560) else "G2"            # noqa: E731  the piano's left hand
+    voice, piano = _parts(L, _tokens(L, clef=bass))
+    assert piano == ("2", [True, False, False, False, False]) and not any(voice[1])
+
+
+def test_with_nothing_to_tell_a_system_is_counted_from_the_top(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + \
+        staff_row(400, [0, 100, 200, 300]) + staff_row(480, [0, 100, 200, 300]) + \
+        staff_row(560, [0, 100, 200, 300]) + \
+        [det("note_quarter", (50, 115, 60, 125), staff_position=0), det("note_quarter", (50, 195, 60, 205), staff_position=0)]
+    L = front.build(dets, 400, 700)
+    assert [len(sy.staves) for sy in L.systems] == [2, 3]
+    first, second, third = _parts(L, _tokens(L))
+    assert first[1][0] and second[1][0] and not third[1][0]
+
+
+def test_near_white_noise_does_not_carry_a_staff_onto_its_brace():
+    import numpy as np
+    from PIL import Image
+
+    from copisteria.vision.page.staves import find_staves
+    page = np.full((200, 500), 255, np.uint8)
+    for y in range(60, 110, 10):
+        page[y, 60:460] = 0                          # the staff's lines, from x = 60
+        page[y, 40:60] = 251                         # a JPEG's faint noise between them and the brace
+    page[50:120, 36:40] = 0                          # the brace
+    assert find_staves(Image.fromarray(page)).staves[0].x0 == 36            # 254: the noise is ink
+    assert find_staves(Image.fromarray(page), paper_tol=front.STAFF_PAPER_TOL).staves[0].x0 == 60
+
+
+def test_a_fullest_system_without_the_braced_pair_is_no_guide(monkeypatch):
+    from copisteria import links
+    monkeypatch.setattr(links, "load", lambda: None)
+    # a piano page whose first grand staff was read as three staves (G, G, F, no brace); the next is a braced pair
+    dets = staff_row(100, [0, 150, 300]) + staff_row(180, [0, 150, 300]) + staff_row(260, [0, 150, 300]) + \
+        staff_row(500, [0, 100, 200, 300]) + staff_row(580, [0, 100, 200, 300]) + \
+        [det("grpSym_brace", (0, 500, 8, 620)), det("note_quarter", (50, 515, 60, 525), staff_position=0),
+         det("note_quarter", (50, 595, 60, 605), staff_position=0)]
+    L = front.build(dets, 400, 800)
+    assert [len(sy.staves) for sy in L.systems] == [3, 2]
+    bass = lambda s: "F4" if s.box[1] in (260, 580) else "G2"            # noqa: E731
+    parts = _parts(L, _tokens(L, clef=bass))
+    assert [sounds[2] for _, sounds in parts] == [True, True, False]       # the pair keeps the top two places
+
+
+def test_a_pale_one_pixel_line_is_evidence_a_grey_patch_is_not():
+    import numpy as np
+    levels = np.full((300, 400), 255, np.uint8)
+    levels[40:60, 50:350] = 0                        # ink, so the page has a dark end
+    a = front.Staff(bars=[], sp=4.5, y0=100, y1=118, x0=40, x1=380)
+    b = front.Staff(bars=[], sp=4.5, y0=180, y1=198, x0=40, x1=380)
+    line = levels.copy()
+    line[100:199, 38] = 204                          # a small render's opening line: one pixel, grey
+    patch = levels.copy()
+    patch[100:199, 20:45] = 204                      # a stamp over the margin
+    assert front._pale_line(line, 255, 0, a, b, 40) > 0.9
+    assert front._pale_line(patch, 255, 0, a, b, 40) < 0.5
+
+
+def test_a_pale_opening_line_joins_two_staves_and_a_white_gap_does_not():
+    import numpy as np
+    from PIL import Image
+    page = np.full((360, 620), 255, np.uint8)
+    for top in (100, 220):                           # a voice's staff and, below it, the piano's top staff
+        for y in range(top, top + 50, 10):
+            page[y, 60:560] = 0
+        for x in (60, 310, 559):
+            page[top:top + 41, x] = 0                # bar lines on each staff, none through the gap
+    dets = staff_row(100, [60, 310, 560]) + staff_row(220, [60, 310, 560])
+    white = front.build(dets, 620, 360, image=Image.fromarray(page))
+    page[100:261, 58] = 204                          # the system's opening line, one pixel, too pale for the mask
+    pale = front.build(dets, 620, 360, image=Image.fromarray(page))
+    assert [len(sy.staves) for sy in white.systems] == [1, 1]
+    assert [len(sy.staves) for sy in pale.systems] == [2]
